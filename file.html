@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Discord Profile Card with Listen Along</title>
+  <style>
+    body {
+      margin: 0;
+      background: radial-gradient(#2c2f33, #1a1c1e);
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      height: 100vh;
+      cursor: default;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+<script src="https://cdn.jsdelivr.net/npm/three@0.156.0/build/three.min.js"></script>
+<script>
+  const userId = '1169111190824308768';
+  const lanyardURL = `https://api.lanyard.rest/v1/users/${userId}`;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.z = 5;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  const light = new THREE.PointLight(0xffffff, 1.5);
+  light.position.set(0, 2, 10);
+  scene.add(light);
+
+  const ambientLight = new THREE.AmbientLight(0x444444);
+  scene.add(ambientLight);
+
+  const cardGroup = new THREE.Group();
+  scene.add(cardGroup);
+
+  const card = new THREE.Mesh(
+    new THREE.BoxGeometry(3.2, 4.4, 0.2),
+    new THREE.MeshStandardMaterial({
+      color: 0x2c2f33,
+      roughness: 0.2,
+      metalness: 0.5
+    })
+  );
+  cardGroup.add(card);
+
+  const outline = new THREE.Mesh(
+    new THREE.BoxGeometry(3.25, 4.45, 0.25),
+    new THREE.MeshBasicMaterial({ color: 0x7289da, wireframe: true, transparent: true, opacity: 0.15 })
+  );
+  cardGroup.add(outline);
+
+  // Cursor setup
+  const cursor = new THREE.Mesh(
+    new THREE.SphereGeometry(0.015, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0x7289da, transparent: true, opacity: 0.8 })
+  );
+  scene.add(cursor);
+
+  let mouseX = 0, mouseY = 0;
+
+  // Raycaster for detecting clicks on 3D objects
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+
+  // Text wrap helper
+  function wrapText(ctx, text, maxWidth) {
+    const words = text.split(' ');
+    const lines = [];
+    let line = '';
+    for (let n = 0; n < words.length; n++) {
+      const testLine = line + words[n] + ' ';
+      const metrics = ctx.measureText(testLine);
+      if (metrics.width > maxWidth && n > 0) {
+        lines.push(line.trim());
+        line = words[n] + ' ';
+      } else {
+        line = testLine;
+      }
+    }
+    lines.push(line.trim());
+    return lines;
+  }
+
+  // Create canvas with wrapped text
+  function createTextCanvas(text, fontSize = 64, maxWidth = 900) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    ctx.font = `bold ${fontSize}px Segoe UI`;
+    const lines = wrapText(ctx, text, maxWidth);
+
+    const lineHeight = fontSize * 1.2;
+    canvas.width = maxWidth + 40; // padding
+    canvas.height = lineHeight * lines.length + 20;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.font = `bold ${fontSize}px Segoe UI`;
+    ctx.fillStyle = '#ffffff';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'center';
+
+    lines.forEach((line, index) => {
+      ctx.fillText(line, canvas.width / 2, 10 + index * lineHeight);
+    });
+
+    return canvas;
+  }
+
+  // Create THREE mesh from canvas text, centered by default
+  function createTextMesh(text, fontSize = 64, y = 0) {
+    const canvas = createTextCanvas(text, fontSize);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+    const aspect = canvas.width / canvas.height;
+    const height = 0.3 * (canvas.height / (fontSize * 1.2));
+    const width = height * aspect;
+
+    const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true });
+    const geometry = new THREE.PlaneGeometry(width, height);
+    const mesh = new THREE.Mesh(geometry, material);
+
+    mesh.position.set(0, y, 0.11); // centered X=0
+    return mesh;
+  }
+
+  // Avatar
+  let avatarMesh = null;
+  function createAvatar(url) {
+    const texture = new THREE.TextureLoader().load(url);
+    if (avatarMesh) {
+      cardGroup.remove(avatarMesh);
+      avatarMesh.material.dispose();
+      avatarMesh.geometry.dispose();
+      avatarMesh = null;
+    }
+    avatarMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.2, 1.2),
+      new THREE.MeshBasicMaterial({ map: texture })
+    );
+    avatarMesh.position.set(0, 1.35, 0.12);
+    cardGroup.add(avatarMesh);
+  }
+
+  // Text meshes
+  let nameTextMesh, statusTextMesh, customStatusMesh, spotifyLabelMesh, spotifyTextMesh, listenAlongMesh;
+
+  function disposeMesh(mesh) {
+    if (!mesh) return;
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+    cardGroup.remove(mesh);
+  }
+
+  function updateTextMeshes(data) {
+  const username = data.discord_user.username + (data.discord_user.discriminator !== "0" ? "#" + data.discord_user.discriminator : "");
+  const statusMap = {
+    online: '🟢 Online',
+    dnd: '🔴 Do Not Disturb',
+    idle: '🟠 Idle',
+    offline: '⚫ Offline'
+  };
+  const statusText = statusMap[data.discord_status] || '⚫ Offline';
+
+  // Check if the username text has changed
+  if (!nameTextMesh || nameTextMesh.text !== username) {
+    disposeMesh(nameTextMesh);
+    nameTextMesh = createTextMesh(username, 24, 1.0); // Adjust y value here
+    nameTextMesh.text = username; // Store the text for comparison
+    cardGroup.add(nameTextMesh);
+  }
+
+  // Check if the status text has changed
+  if (!statusTextMesh || statusTextMesh.text !== statusText) {
+    disposeMesh(statusTextMesh);
+    statusTextMesh = createTextMesh(statusText, 20, 0.4);
+    statusTextMesh.text = statusText;
+    cardGroup.add(statusTextMesh);
+  }
+
+  if (data.kv && data.kv.Text) {
+    const customStatus = `💬 ${data.kv.Text}`;
+    if (!customStatusMesh || customStatusMesh.text !== customStatus) {
+      disposeMesh(customStatusMesh);
+      customStatusMesh = createTextMesh(customStatus, 18, 0);
+      customStatusMesh.text = customStatus; 
+      cardGroup.add(customStatusMesh);
+    }
+  }
+
+  if (data.listening_to_spotify && data.spotify && data.spotify.song) {
+    const spotifySong = `🎵 ${data.spotify.song}`;
+    const listenAlongText = "▶️ Listen Along";
+
+    if (!spotifyLabelMesh || spotifyLabelMesh.text !== "Listening to:") {
+      disposeMesh(spotifyLabelMesh);
+      spotifyLabelMesh = createTextMesh("Listening to:", 18, -0.8);
+      cardGroup.add(spotifyLabelMesh);
+    }
+
+    if (!spotifyTextMesh || spotifyTextMesh.text !== spotifySong) {
+      disposeMesh(spotifyTextMesh);
+      spotifyTextMesh = createTextMesh(spotifySong, 20, -1.2);
+      cardGroup.add(spotifyTextMesh);
+    }
+
+    if (!listenAlongMesh || listenAlongMesh.text !== listenAlongText) {
+      disposeMesh(listenAlongMesh);
+      listenAlongMesh = createTextMesh(listenAlongText, 16, -1.6);
+      listenAlongMesh.userData = {
+        url: `https://open.spotify.com/track/${data.spotify.track_id}`
+      };
+      cardGroup.add(listenAlongMesh);
+    }
+  }
+}
+
+  function getAvatarURL(discordUser) {
+    if (!discordUser.avatar) return 'https://cdn.discordapp.com/embed/avatars/0.png';
+    return `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png?size=128`;
+  }
+
+  let lastDataString = "";
+
+  async function fetchLanyard() {
+    try {
+      const res = await fetch(lanyardURL);
+      const json = await res.json();
+      if (json.success) {
+        const dataStr = JSON.stringify(json.data);
+        if (dataStr !== lastDataString) {
+          lastDataString = dataStr;
+          const data = json.data;
+          createAvatar(getAvatarURL(data.discord_user));
+          updateTextMeshes(data);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch Lanyard API:', err);
+    }
+  }
+
+  fetchLanyard();
+  setInterval(fetchLanyard, 10000);
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    cardGroup.rotation.y += (mouseX * 0.3 - cardGroup.rotation.y) * 0.1;
+    cardGroup.rotation.x += (mouseY * 0.3 - cardGroup.rotation.x) * 0.1;
+
+    if (clickPulse > 0) {
+      cursor.scale.setScalar(1 + clickPulse * 0.5);
+      cursor.material.opacity = 0.8 * (1 - clickPulse);
+      clickPulse -= 0.05;
+    } else {
+      cursor.scale.setScalar(1);
+      cursor.material.opacity = 0.8;
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  let clickPulse = 0;
+
+  document.addEventListener('click', () => {
+    clickPulse = 1;
+  });
+
+  function onDocumentMouseMove(event) {
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects([listenAlongMesh].filter(Boolean));
+    if (intersects.length > 0) {
+      document.body.style.cursor = 'pointer';
+    } else {
+      document.body.style.cursor = 'default';
+    }
+
+    const vector = new THREE.Vector3(mouse.x, mouse.y, 0.5).unproject(camera);
+    cursor.position.copy(vector);
+  }
+
+  document.addEventListener('mousemove', onDocumentMouseMove, false);
+
+  function onDocumentMouseDown(event) {
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersects = raycaster.intersectObjects([listenAlongMesh].filter(Boolean));
+    if (intersects.length > 0) {
+      const url = intersects[0].object.userData.url;
+      if (url) {
+        window.open(url, '_blank');
+      }
+    }
+  }
+
+  window.addEventListener('mousedown', onDocumentMouseDown, false);
+
+  window.addEventListener('mousemove', e => {
+    mouseX = (e.clientX / window.innerWidth - 0.5) * 2;
+    mouseY = -(e.clientY / window.innerHeight - 0.5) * 2;
+  });
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  animate();
+</script>
+<script>
+	if ('WebSocket' in window) {
+		(function () {
+			function refreshCSS() {
+				var sheets = [].slice.call(document.getElementsByTagName("link"));
+				var head = document.getElementsByTagName("head")[0];
+				for (var i = 0; i < sheets.length; ++i) {
+					var elem = sheets[i];
+					var parent = elem.parentElement || head;
+					parent.removeChild(elem);
+					var rel = elem.rel;
+					if (elem.href && typeof rel != "string" || rel.length == 0 || rel.toLowerCase() == "stylesheet") {
+						var url = elem.href.replace(/(&|\?)_cacheOverride=\d+/, '');
+						elem.href = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_cacheOverride=' + (new Date().valueOf());
+					}
+					parent.appendChild(elem);
+				}
+			}
+			var protocol = window.location.protocol === 'http:' ? 'ws://' : 'wss://';
+			var address = protocol + window.location.host + window.location.pathname + '/ws';
+			var socket = new WebSocket(address);
+			socket.onmessage = function (msg) {
+				if (msg.data == 'reload') window.location.reload();
+				else if (msg.data == 'refreshcss') refreshCSS();
+			};
+			if (sessionStorage && !sessionStorage.getItem('IsThisFirstTime_Log_From_LiveServer')) {
+				console.log('Live reload enabled.');
+				sessionStorage.setItem('IsThisFirstTime_Log_From_LiveServer', true);
+			}
+		})();
+	}
+	else {
+		console.error('Upgrade your browser. This Browser is NOT supported WebSocket for Live-Reloading.');
+	}
+</script>
+</body>
+</html>
